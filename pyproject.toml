@@ -38,6 +38,7 @@ testpaths = ["tests"]
 markers = [
     "slow: full experiment sweeps, deselect with -m 'not slow'",
     "network: needs the network, deselected by default",
+    "allow_stray_files: exempt from the working-directory cleanliness check",
 ]
 addopts = "-m 'not network'"
 
