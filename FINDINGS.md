@@ -322,4 +322,18 @@ pip install -r requirements-dev.txt
 python -m experiments.smith1962
 python -m experiments.week5_hypothesis
 python -m experiments.week7_sentiment --download   # first run only, fetches the tokenizer
+python -m experiments.sentiment_evaluation
 ```
+
+The profit table above is the one figure here that a bare command does not
+reproduce. It needs the published sample size explicitly:
+
+```bash
+python -m experiments.strategy_profit --sessions 40 --each 20
+```
+
+That takes over fifteen minutes, because the head to head arm runs six pairs of
+strategies over forty sessions each. The default of twenty sessions runs in a
+couple of minutes and **does not reach the same conclusion**: the profit
+comparison gives p = 0.057 there against p = 0.00103 at forty. That difference
+is the point about sample size rather than a caveat to it, so both are quoted.

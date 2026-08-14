@@ -104,6 +104,15 @@ def print_claims(family: ClaimFamily) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    # The default is deliberately smaller than the settings FINDINGS.md
+    # publishes. Reproducing that table needs --sessions 40 --each 20, which
+    # takes over fifteen minutes because the head to head arm runs six pairs;
+    # the exact command is in the "Reproducing all of this" section there.
+    #
+    # Note that the default is not merely a faster version of the same answer:
+    # the profit comparison gives p = 0.057 at twenty sessions and p = 0.00103
+    # at forty, so a default run does not reach the published conclusion. That
+    # is the point being made about sample size rather than a caveat to it.
     parser.add_argument("--sessions", type=int, default=20, help="independent runs per condition")
     parser.add_argument("--seconds", type=float, default=600.0, help="simulated session length")
     parser.add_argument("--periods", type=int, default=10, help="trading periods per session")
