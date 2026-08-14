@@ -11,6 +11,16 @@ falls is a question with an answer rather than an assumption.
 
 Everything here is parameterised and takes a seed, so a reported number can be
 reproduced. Figures are a by-product, not the result.
+
+Reporting one alpha per scenario was still not enough. A scenario's alpha is
+pooled over every session it ran, which collapses the sample down to a single
+number and leaves "4.50 is better than 18.12" as an eyeball comparison of two
+point estimates with no spread attached. The sessions are independent runs, so
+the sample was there all along: `session_alphas` scores each session on its own,
+giving n numbers per scenario, and `convergence_claims` puts the claims this
+repository makes about those numbers through the same assumption-aware pipeline
+the week 5 strand uses on somebody else's data, with the same Holm correction
+across the family.
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from fintech.hypothesis_tests import DEFAULT_ALPHA, AnalysisResult, analyse, holm_correction
 from fintech.market import PooledTape, SessionResult, pool_tapes, run_sessions
 from fintech.plotting import new_figure, save_figure
 from fintech.schedules import (
@@ -109,6 +120,19 @@ class ScenarioResult:
         return math.sqrt(weighted / total)
 
     @property
+    def session_alphas(self) -> np.ndarray:
+        """One alpha per session: the sample the pooled figures were hiding.
+
+        Each session is scored the way `alpha_overall` scores the pooled tape,
+        period by period against the equilibrium in force, so the two are the
+        same measurement at different granularity. A session that never traded
+        contributes NaN rather than zero, because "no trades" is not "perfectly
+        converged", and the testing pipeline drops NaN rather than believing it.
+        """
+
+        return session_alphas(self)
+
+    @property
     def n_silent_periods(self) -> int:
         """Periods in which the pooled market did no trade at all.
 
@@ -160,6 +184,12 @@ class ScenarioResult:
             "alpha_first": self.alpha_first,
             "alpha_last": self.alpha_last,
             "alpha_overall": self.alpha_overall,
+            "alpha_session_mean": float(np.nanmean(self.session_alphas))
+            if self.sessions
+            else math.nan,
+            "alpha_session_sd": float(np.nanstd(self.session_alphas, ddof=1))
+            if len(self.sessions) > 1
+            else math.nan,
             "ratio": self.convergence_ratio,
             "final_trades": self.final_trades,
             "final_mean_price": self.final_mean_price,
@@ -397,6 +427,251 @@ def summary_table(results: Sequence[ScenarioResult]) -> pd.DataFrame:
     """One row per scenario, in the order they were run."""
 
     return pd.DataFrame([result.summary_row() for result in results])
+
+
+@dataclass(frozen=True, eq=False)
+class AlphaSample:
+    """A named sample of per-session alphas, which is what claims are made about."""
+
+    label: str
+    values: np.ndarray
+
+    @property
+    def n(self) -> int:
+        return int(np.count_nonzero(~np.isnan(self.values)))
+
+    @property
+    def mean(self) -> float:
+        return float(np.nanmean(self.values)) if self.n else math.nan
+
+
+@dataclass(frozen=True, eq=False)
+class ClaimResult:
+    """One stated claim about convergence, and whether the sessions support it.
+
+    `supported` requires two things and reports them separately, because they
+    fail in different ways: the difference has to point the way the claim says it
+    does, and it has to survive the test. A claim can be true in direction and
+    still be unsupported, which is the honest thing to say about most of these.
+    """
+
+    claim: str
+    better: str
+    worse: str
+    n_better: int
+    n_worse: int
+    mean_better: float
+    mean_worse: float
+    test: str
+    p_value: float
+    p_value_corrected: float
+    significant: bool
+    analysis: AnalysisResult
+
+    @property
+    def direction_holds(self) -> bool:
+        """Is the scenario the claim calls better actually the one with lower alpha?"""
+
+        return self.mean_better < self.mean_worse
+
+    @property
+    def supported(self) -> bool:
+        return self.direction_holds and self.significant
+
+    @property
+    def verdict(self) -> str:
+        if self.supported:
+            return "supported"
+        if not self.direction_holds:
+            return "contradicted: the difference runs the other way"
+        return "not supported: the difference is not distinguishable from noise"
+
+
+@dataclass(frozen=True, eq=False)
+class ClaimFamily:
+    """Every convergence claim tested together, with one correction across the set."""
+
+    claims: tuple[ClaimResult, ...]
+    alpha: float = DEFAULT_ALPHA
+
+    def to_frame(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "claim": claim.claim,
+                    "better": claim.better,
+                    "worse": claim.worse,
+                    "mean_alpha_better": claim.mean_better,
+                    "mean_alpha_worse": claim.mean_worse,
+                    "n": min(claim.n_better, claim.n_worse),
+                    "test": claim.test,
+                    "p_value": claim.p_value,
+                    "p_holm": claim.p_value_corrected,
+                    "verdict": claim.verdict,
+                }
+                for claim in self.claims
+            ]
+        )
+
+    @property
+    def supported(self) -> tuple[ClaimResult, ...]:
+        return tuple(claim for claim in self.claims if claim.supported)
+
+    @property
+    def unsupported(self) -> tuple[ClaimResult, ...]:
+        return tuple(claim for claim in self.claims if not claim.supported)
+
+
+def session_alphas(result: ScenarioResult, periods: Sequence[int] | None = None) -> np.ndarray:
+    """Alpha per session, optionally restricted to a subset of trading periods.
+
+    Restricting the periods is what makes the shock claim testable. FINDINGS.md
+    says the shocked market ends up tighter than the market ever tracked the
+    original equilibrium, and that is a statement about the periods after the
+    shock. Scoring the whole session would mix them with the pre-shock half,
+    which is the unshocked scenario, and dilute the comparison into meaninglessness.
+    """
+
+    wanted = result.periods if periods is None else tuple(result.periods[i] for i in periods)
+    values: list[float] = []
+    for session in result.sessions:
+        total = 0
+        weighted = 0.0
+        for period in wanted:
+            prices = session.between(period.start, period.end)
+            if prices.size == 0:
+                continue
+            total += int(prices.size)
+            weighted += prices.size * smiths_alpha(prices, period.equilibrium) ** 2
+        values.append(math.sqrt(weighted / total) if total else math.nan)
+    return np.asarray(values, dtype=float)
+
+
+def alpha_sample(
+    result: ScenarioResult, periods: Sequence[int] | None = None, label: str = ""
+) -> AlphaSample:
+    """A named per-session alpha sample drawn from one scenario."""
+
+    return AlphaSample(label=label or result.name, values=session_alphas(result, periods))
+
+
+def alpha_frame(samples: Sequence[AlphaSample]) -> pd.DataFrame:
+    """One column per sample, ready for the testing pipeline.
+
+    Samples need not be the same length, so the columns are padded with NaN,
+    which `fintech.hypothesis_tests` drops column by column.
+    """
+
+    if not samples:
+        raise ValueError("nothing to compare")
+    return pd.DataFrame({sample.label: pd.Series(sample.values) for sample in samples})
+
+
+def compare_scenarios(
+    results: Sequence[ScenarioResult], name: str = "convergence", alpha: float = DEFAULT_ALPHA
+) -> AnalysisResult:
+    """Put whole-session alpha for several scenarios through the repo's own pipeline."""
+
+    frame = alpha_frame([alpha_sample(result) for result in results])
+    return analyse(frame, name=name, alpha=alpha)
+
+
+def judge_claim(
+    claim: str,
+    better: AlphaSample,
+    worse: AlphaSample,
+    alpha: float = DEFAULT_ALPHA,
+) -> tuple[str, AlphaSample, AlphaSample, AnalysisResult]:
+    """Package one stated claim with the two-sample analysis that will judge it."""
+
+    analysis = analyse(alpha_frame([better, worse]), name=claim, alpha=alpha)
+    return (claim, better, worse, analysis)
+
+
+def build_claim_family(
+    judged: Sequence[tuple[str, AlphaSample, AlphaSample, AnalysisResult]],
+    alpha: float = DEFAULT_ALPHA,
+) -> ClaimFamily:
+    """Holm correct across every claim, then decide each one.
+
+    Testing four claims at 0.05 each gives roughly a one in five chance of a
+    spurious "significant" somewhere. The week 5 module already refuses to make
+    that mistake with its normality tests; there is no reason for this strand to
+    make it with its own.
+    """
+
+    corrected = holm_correction([analysis.omnibus.p_value for _, _, _, analysis in judged])
+    claims = tuple(
+        ClaimResult(
+            claim=text,
+            better=better.label,
+            worse=worse.label,
+            n_better=better.n,
+            n_worse=worse.n,
+            mean_better=better.mean,
+            mean_worse=worse.mean,
+            test=analysis.omnibus.test,
+            p_value=analysis.omnibus.p_value,
+            p_value_corrected=float(adjusted),
+            significant=bool(adjusted < alpha),
+            analysis=analysis,
+        )
+        for (text, better, worse, analysis), adjusted in zip(judged, corrected, strict=True)
+    )
+    return ClaimFamily(claims=claims, alpha=alpha)
+
+
+def convergence_claims(
+    seed: int = DEFAULT_SEED,
+    n_sessions: int = 20,
+    end_time: float = DEFAULT_SESSION_SECONDS,
+    n_periods: int = DEFAULT_PERIODS,
+    n_each: int = 10,
+    alpha: float = DEFAULT_ALPHA,
+) -> ClaimFamily:
+    """Test the convergence claims this repository makes, as one corrected family.
+
+    The claims are taken from FINDINGS.md rather than invented here, so that the
+    document and the test cannot drift apart: if a claim fails, the document is
+    what has to change.
+    """
+
+    common = {"seed": seed, "n_sessions": n_sessions, "end_time": end_time, "n_periods": n_periods}
+    periodic, drip = arrival_mode_comparison(**common)
+    homogeneous, mixed = trader_mix_comparison(n_each=n_each, **common)
+    thin, thick = trader_count_comparison(**common)
+    shock = shock_scenario(n_each=n_each, **common)
+
+    # The shock lands half way through, so the periods after it are the back half.
+    late = tuple(range(n_periods // 2, n_periods))
+    judged = [
+        judge_claim(
+            "drip-poisson converges better than periodic",
+            alpha_sample(drip, label="drip-poisson"),
+            alpha_sample(periodic, label="periodic"),
+            alpha=alpha,
+        ),
+        judge_claim(
+            "the mixed population converges better than all-ZIP",
+            alpha_sample(mixed, label="mixed"),
+            alpha_sample(homogeneous, label="all-ZIP"),
+            alpha=alpha,
+        ),
+        judge_claim(
+            "a thicker all-ZIP market converges better",
+            alpha_sample(thick, label="40 ZIP a side"),
+            alpha_sample(thin, label="11 ZIP a side"),
+            alpha=alpha,
+        ),
+        judge_claim(
+            "after the shock the market tracks the new equilibrium more tightly "
+            "than the unshocked market tracked the old one",
+            alpha_sample(shock, late, label="shocked, post-shock periods"),
+            alpha_sample(mixed, late, label="unshocked mixed, same periods"),
+            alpha=alpha,
+        ),
+    ]
+    return build_claim_family(judged, alpha=alpha)
 
 
 def plot_transactions(result: ScenarioResult, directory: str | Path) -> Path:

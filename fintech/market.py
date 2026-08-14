@@ -22,11 +22,17 @@ transactions are `TRD, time, price` but cancellations are `CAN, time, qid, side,
 price`. Reading column 2 from every row, as the notebook does, silently reads
 order IDs as prices the moment cancellations are enabled. Rows are filtered on
 the event type instead.
+
+The wrapper also asks BSE for its average-balance dump, which the earlier
+version of this module switched off. The tape says what prices happened; it says
+nothing about who made money, and "which trading algorithm profits" is a question
+the tape cannot answer at all. That dump is the only place BSE records it.
 """
 
 from __future__ import annotations
 
 import csv
+import math
 import os
 import random
 import tempfile
@@ -42,8 +48,8 @@ import pandas as pd
 from fintech.schedules import OrderSchedule, TraderPopulation
 from fintech.vendor.BSE import market_session
 
-#: BSE names its output files after the session id. Only the tape is ever asked
-#: for; the other four files cost time to write and are never read back.
+#: BSE names its output files after the session id. The minimum that produces a
+#: tape, kept as the reference for what a price-only run costs.
 TAPE_ONLY = {
     "dump_blotters": False,
     "dump_lobs": False,
@@ -52,17 +58,58 @@ TAPE_ONLY = {
     "dump_tape": True,
 }
 
+#: What a session actually asks for. Two of BSE's five dumps are read back here;
+#: the other three cost time to write and are never looked at.
+TAPE_AND_BALANCES = {**TAPE_ONLY, "dump_avgbals": True}
+
 #: The tape's event-type column for a completed transaction.
 TRADE_EVENT = "TRD"
+
+#: `trade_stats` writes four fixed columns and then one group of four columns per
+#: trader type present: name, total profit, head count, mean profit per trader.
+BALANCE_PREFIX_COLUMNS = 4
+BALANCE_GROUP_COLUMNS = 4
 
 # BSE reads and writes the process-wide working directory and the process-wide
 # random state, so sessions cannot safely overlap within one process.
 _SESSION_LOCK = threading.Lock()
 
 
+@dataclass(frozen=True)
+class StrategyBalance:
+    """One trader type's takings at one instant, as BSE records them.
+
+    `total_profit` is the sum of the traders' balances, which start at zero and
+    accumulate the profit booked on each completed customer order, so it is
+    profit rather than wealth. `n_traders` counts that type across both sides of
+    the book, which is why `mean_profit` is the only comparable number when the
+    population is not balanced: a type with twice the head count earns roughly
+    twice the total while being no better at trading.
+    """
+
+    strategy: str
+    total_profit: float
+    n_traders: int
+    mean_profit: float
+
+
+@dataclass(frozen=True)
+class BalanceSnapshot:
+    """One row of the average-balance dump: the whole population at one time."""
+
+    time: float
+    best_bid: float | None
+    best_ask: float | None
+    strategies: dict[str, StrategyBalance]
+
+    def mean_profit(self, strategy: str) -> float:
+        entry = self.strategies.get(strategy)
+        return entry.mean_profit if entry is not None else math.nan
+
+
 @dataclass(frozen=True, eq=False)
 class SessionResult:
-    """The transaction price time series from one market session."""
+    """One market session: what it traded at, and what each strategy earned."""
 
     session_id: str
     seed: int
@@ -70,10 +117,46 @@ class SessionResult:
     end_time: float
     times: np.ndarray
     prices: np.ndarray
+    balances: tuple[BalanceSnapshot, ...] = ()
 
     @property
     def n_transactions(self) -> int:
         return int(self.times.size)
+
+    @property
+    def final_balances(self) -> dict[str, StrategyBalance]:
+        """The last row of the balance dump: profit at the end of the session.
+
+        BSE writes a row after every transaction and one more when the session
+        closes, so even a market that never traded gets a final row, of zeros.
+        The dict is empty only for a `SessionResult` built without a dump, which
+        is what the tests do when they need a result and not a simulation.
+        """
+
+        return dict(self.balances[-1].strategies) if self.balances else {}
+
+    @property
+    def mean_profit_per_trader(self) -> dict[str, float]:
+        """Final profit per trader, by strategy. The fair cross-strategy number."""
+
+        return {name: entry.mean_profit for name, entry in self.final_balances.items()}
+
+    def balance_frame(self) -> pd.DataFrame:
+        """The balance dump as a long frame: one row per (time, strategy)."""
+
+        records = [
+            {
+                "time": snapshot.time,
+                "strategy": entry.strategy,
+                "total_profit": entry.total_profit,
+                "n_traders": entry.n_traders,
+                "mean_profit": entry.mean_profit,
+            }
+            for snapshot in self.balances
+            for entry in snapshot.strategies.values()
+        ]
+        columns = ["time", "strategy", "total_profit", "n_traders", "mean_profit"]
+        return pd.DataFrame(records, columns=columns)
 
     def to_frame(self) -> pd.DataFrame:
         return pd.DataFrame({"time": self.times, "price": self.prices})
@@ -149,6 +232,58 @@ def parse_tape(path: str | os.PathLike[str]) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(times, dtype=float), np.asarray(prices, dtype=float)
 
 
+def _optional_price(field: str) -> float | None:
+    """BSE writes the literal `None` when a side of the book is empty."""
+
+    text = field.strip()
+    if not text or text == "None":
+        return None
+    return float(text)
+
+
+def parse_avg_balance(path: str | os.PathLike[str]) -> tuple[BalanceSnapshot, ...]:
+    """Read a BSE `_avg_balance.csv` into snapshots of profit by trader type.
+
+    The row shape is `sess_id, time, best_bid, best_ask` followed by one group of
+    four columns per trader type. The number of groups is not fixed: `trade_stats`
+    re-derives the set of types on every call, and a type only appears once one of
+    its traders exists, so a row cannot be parsed by column index against a header
+    that BSE never writes. Groups are read off the end of the prefix instead, and
+    a row whose tail is not a whole number of groups is skipped rather than
+    silently misaligned.
+    """
+
+    snapshots: list[BalanceSnapshot] = []
+    with open(path, newline="") as handle:
+        for row in csv.reader(handle):
+            fields = [field.strip() for field in row]
+            while fields and fields[-1] == "":
+                fields.pop()
+            if len(fields) < BALANCE_PREFIX_COLUMNS:
+                continue
+            tail = fields[BALANCE_PREFIX_COLUMNS:]
+            if len(tail) % BALANCE_GROUP_COLUMNS:
+                continue
+            strategies: dict[str, StrategyBalance] = {}
+            for start in range(0, len(tail), BALANCE_GROUP_COLUMNS):
+                name, total, count, mean = tail[start : start + BALANCE_GROUP_COLUMNS]
+                strategies[name] = StrategyBalance(
+                    strategy=name,
+                    total_profit=float(total),
+                    n_traders=int(count),
+                    mean_profit=float(mean),
+                )
+            snapshots.append(
+                BalanceSnapshot(
+                    time=float(fields[1]),
+                    best_bid=_optional_price(fields[2]),
+                    best_ask=_optional_price(fields[3]),
+                    strategies=strategies,
+                )
+            )
+    return tuple(snapshots)
+
+
 def run_session(
     schedule: OrderSchedule,
     population: TraderPopulation,
@@ -175,13 +310,17 @@ def run_session(
                 end_time,
                 trader_spec,
                 order_schedule,
-                dict(TAPE_ONLY),
+                dict(TAPE_AND_BALANCES),
                 verbose,
             )
         tape_path = scratch_path / f"{session_id}_tape.csv"
         if not tape_path.is_file():
             raise RuntimeError(f"BSE wrote no tape for session {session_id!r}")
         times, prices = parse_tape(tape_path)
+        balance_path = scratch_path / f"{session_id}_avg_balance.csv"
+        if not balance_path.is_file():
+            raise RuntimeError(f"BSE wrote no balance dump for session {session_id!r}")
+        balances = parse_avg_balance(balance_path)
 
     return SessionResult(
         session_id=session_id,
@@ -190,6 +329,7 @@ def run_session(
         end_time=end_time,
         times=times,
         prices=prices,
+        balances=balances,
     )
 
 

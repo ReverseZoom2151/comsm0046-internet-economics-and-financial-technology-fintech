@@ -63,8 +63,40 @@ def test_market_session_reads_the_dump_flags_this_project_supplies():
 
 
 def test_wrapper_supplies_exactly_the_expected_flags():
-    from fintech.market import TAPE_ONLY
+    """The flags the wrapper actually passes must be the set BSE reads.
 
-    assert set(TAPE_ONLY) == EXPECTED_DUMP_FLAGS
+    BSE indexes this dictionary by key without a default, so a missing key is a
+    KeyError part way through a session rather than a refusal up front. Both
+    dictionaries are checked, because the wrapper asks for balances as well as
+    the tape and it is the one it passes that has to be right.
+    """
+
+    from fintech.market import TAPE_AND_BALANCES, TAPE_ONLY
+
+    for flags in (TAPE_ONLY, TAPE_AND_BALANCES):
+        assert set(flags) == EXPECTED_DUMP_FLAGS
+
     assert TAPE_ONLY["dump_tape"] is True
     assert not any(value for key, value in TAPE_ONLY.items() if key != "dump_tape")
+
+    # The tape carries transaction prices and the balances carry profit per
+    # strategy. Nothing else is requested, because the other three dumps are
+    # large and this project reads none of them.
+    assert TAPE_AND_BALANCES["dump_tape"] is True
+    assert TAPE_AND_BALANCES["dump_avgbals"] is True
+    assert not any(
+        value
+        for key, value in TAPE_AND_BALANCES.items()
+        if key not in {"dump_tape", "dump_avgbals"}
+    )
+
+
+def test_the_wrapper_passes_the_dictionary_it_advertises():
+    """A regression guard: run_session must use the flags the tests check."""
+
+    import inspect
+
+    from fintech import market
+
+    source = inspect.getsource(market.run_session)
+    assert "TAPE_AND_BALANCES" in source

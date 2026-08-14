@@ -9,21 +9,29 @@ at a fraction of their published size; the full sweeps are marked slow.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
 
-from fintech.market import pool_tapes, run_sessions
+from fintech.market import SessionResult, pool_tapes, run_sessions
 from fintech.schedules import all_zip, fixed_schedule, mixed_population, shock_schedule
 from fintech.smith import (
+    AlphaSample,
     ScenarioResult,
+    alpha_frame,
     arrival_mode_comparison,
+    build_claim_family,
     chart1_baseline,
+    compare_scenarios,
+    convergence_claims,
+    judge_claim,
     period_bounds,
     period_stats,
     plot_alpha,
     plot_transactions,
     run_scenario,
+    session_alphas,
     shock_scenario,
     smiths_alpha,
     summary_table,
@@ -286,3 +294,141 @@ def test_shock_scenario_moves_its_target_mid_session():
 def test_full_baseline_converges():
     result = chart1_baseline(seed=100, n_sessions=10)
     assert result.alpha_last < result.alpha_first
+
+
+def test_session_alphas_give_one_number_per_session():
+    result = tiny_scenario(n_sessions=3)
+
+    alphas = result.session_alphas
+
+    assert alphas.shape == (3,)
+    assert np.all(alphas[~np.isnan(alphas)] >= 0.0)
+
+
+def test_a_session_that_never_traded_contributes_nan_rather_than_zero():
+    """Zero would read as a perfectly converged market, which is the opposite."""
+
+    result = tiny_scenario(n_sessions=2)
+    silent = SessionResult(
+        session_id="silent",
+        seed=0,
+        start_time=0.0,
+        end_time=SHORT_END,
+        times=np.empty(0),
+        prices=np.empty(0),
+    )
+    with_silence = replace(result, sessions=(*result.sessions, silent))
+
+    alphas = with_silence.session_alphas
+
+    assert alphas.size == 3
+    assert math.isnan(alphas[-1])
+
+
+def test_restricting_the_periods_changes_the_alpha_it_measures():
+    result = tiny_scenario(n_sessions=2)
+
+    whole = session_alphas(result)
+    late = session_alphas(result, periods=range(PERIODS // 2, PERIODS))
+
+    assert whole.shape == late.shape
+    assert not np.array_equal(whole, late)
+
+
+def test_alpha_frame_is_one_column_per_sample_padded_to_the_longest():
+    frame = alpha_frame(
+        [
+            AlphaSample("short", np.array([1.0, 2.0])),
+            AlphaSample("long", np.array([3.0, 4.0, 5.0])),
+        ]
+    )
+
+    assert list(frame.columns) == ["short", "long"]
+    assert len(frame) == 3
+    assert math.isnan(frame["short"].iloc[2])
+
+
+def test_alpha_frame_of_nothing_is_an_error():
+    with pytest.raises(ValueError, match="nothing to compare"):
+        alpha_frame([])
+
+
+def synthetic(label: str, centre: float, spread: float = 0.5, n: int = 12) -> AlphaSample:
+    """A reproducible alpha sample, so the claim logic can be tested without a market."""
+
+    offsets = np.linspace(-spread, spread, n)
+    return AlphaSample(label, centre + offsets)
+
+
+def test_a_claim_backed_by_a_large_separation_is_supported():
+    judged = [judge_claim("tight beats loose", synthetic("tight", 2.0), synthetic("loose", 9.0))]
+
+    (claim,) = build_claim_family(judged).claims
+
+    assert claim.direction_holds
+    assert claim.significant
+    assert claim.supported
+    assert claim.verdict == "supported"
+
+
+def test_a_claim_whose_difference_runs_the_other_way_is_reported_as_contradicted():
+    judged = [judge_claim("loose beats tight", synthetic("loose", 9.0), synthetic("tight", 2.0))]
+
+    (claim,) = build_claim_family(judged).claims
+
+    assert not claim.direction_holds
+    assert not claim.supported
+    assert "other way" in claim.verdict
+
+
+def test_a_claim_with_overlapping_samples_is_not_supported():
+    judged = [
+        judge_claim("a beats b", synthetic("a", 5.0, spread=3.0), synthetic("b", 5.05, spread=3.0))
+    ]
+
+    (claim,) = build_claim_family(judged).claims
+
+    assert claim.direction_holds
+    assert not claim.significant
+    assert "noise" in claim.verdict
+
+
+def test_the_family_correction_is_applied_across_every_claim():
+    judged = [
+        judge_claim("one", synthetic("a", 2.0), synthetic("b", 9.0)),
+        judge_claim("two", synthetic("c", 3.0), synthetic("d", 8.0)),
+        judge_claim("three", synthetic("e", 5.0, spread=3.0), synthetic("f", 5.05, spread=3.0)),
+    ]
+
+    family = build_claim_family(judged)
+
+    assert len(family.claims) == 3
+    # Holm can only raise a p-value.
+    assert all(claim.p_value_corrected >= claim.p_value for claim in family.claims)
+    assert len(family.supported) + len(family.unsupported) == 3
+    assert list(family.to_frame()["claim"]) == ["one", "two", "three"]
+
+
+def test_compare_scenarios_runs_the_repositorys_own_pipeline():
+    results = [tiny_scenario("a", seed=1, n_sessions=4), tiny_scenario("b", seed=40, n_sessions=4)]
+
+    analysis = compare_scenarios(results, name="tiny comparison")
+
+    assert analysis.name == "tiny comparison"
+    assert analysis.conditions == ("a", "b")
+    assert analysis.omnibus.test in {"one-way ANOVA", "Welch ANOVA", "Kruskal-Wallis H"}
+    assert analysis.omnibus.reason
+
+
+@pytest.mark.slow
+def test_the_convergence_claims_run_end_to_end():
+    family = convergence_claims(seed=7, n_sessions=4, end_time=SHORT_END, n_periods=4, n_each=2)
+
+    assert len(family.claims) == 4
+    frame = family.to_frame()
+    assert len(frame) == 4
+    assert set(frame["verdict"]) <= {
+        "supported",
+        "contradicted: the difference runs the other way",
+        "not supported: the difference is not distinguishable from noise",
+    }

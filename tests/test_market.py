@@ -15,6 +15,7 @@ import pytest
 
 from fintech.market import (
     PooledTape,
+    parse_avg_balance,
     parse_tape,
     pool_tapes,
     run_session,
@@ -186,6 +187,107 @@ def test_parse_tape_of_an_empty_file_gives_empty_arrays(tmp_path):
 def test_session_rejects_a_backwards_clock():
     with pytest.raises(ValueError, match="positive duration"):
         run_session(short_schedule(), all_zip(6), seed=1, start_time=60.0, end_time=60.0)
+
+
+def test_parse_avg_balance_reads_the_repeating_four_column_groups(tmp_path):
+    dump = tmp_path / "example_avg_balance.csv"
+    dump.write_text(
+        "prof, 000180, 193, 259, GVWY, 332, 10, 33.200000, SHVR, 567, 10, 56.700000, "
+        "ZIC, 855, 10, 85.500000, ZIP, 582, 10, 58.200000, \n",
+        encoding="utf-8",
+    )
+
+    (snapshot,) = parse_avg_balance(dump)
+
+    assert snapshot.time == 180.0
+    assert (snapshot.best_bid, snapshot.best_ask) == (193.0, 259.0)
+    assert sorted(snapshot.strategies) == ["GVWY", "SHVR", "ZIC", "ZIP"]
+    assert snapshot.strategies["ZIC"].total_profit == 855.0
+    assert snapshot.strategies["ZIC"].n_traders == 10
+    assert snapshot.mean_profit("ZIC") == pytest.approx(85.5)
+
+
+def test_parse_avg_balance_handles_an_empty_side_of_the_book(tmp_path):
+    # BSE writes the literal string None when there is no best bid or ask, which
+    # float() would raise on.
+    dump = tmp_path / "empty_avg_balance.csv"
+    dump.write_text("prof, 000001, None, None, ZIP, 0, 6, 0.000000, \n", encoding="utf-8")
+
+    (snapshot,) = parse_avg_balance(dump)
+
+    assert snapshot.best_bid is None
+    assert snapshot.best_ask is None
+    assert snapshot.strategies["ZIP"].mean_profit == 0.0
+
+
+def test_parse_avg_balance_skips_rows_it_cannot_align(tmp_path):
+    dump = tmp_path / "ragged_avg_balance.csv"
+    dump.write_text(
+        "prof, 000001, 100, 101, ZIP, 10, 2, 5.000000, \n"
+        "prof, 000002\n"
+        "prof, 000003, 100, 101, ZIP, 10\n",
+        encoding="utf-8",
+    )
+
+    snapshots = parse_avg_balance(dump)
+
+    # A row with a partial group would otherwise be read with its columns
+    # shifted, which is a wrong number rather than a missing one.
+    assert [snapshot.time for snapshot in snapshots] == [1.0]
+
+
+def test_a_session_reports_profit_per_trader_for_every_strategy_present():
+    result = run_session(
+        short_schedule("drip-poisson", 10.0), mixed_population(3), seed=13, end_time=SHORT_END
+    )
+
+    assert result.balances, "the average-balance dump must be read back"
+    profits = result.mean_profit_per_trader
+    assert sorted(profits) == ["GVWY", "SHVR", "ZIC", "ZIP"]
+    assert all(value >= 0.0 for value in profits.values())
+    # Six traders of each type, three a side.
+    assert {entry.n_traders for entry in result.final_balances.values()} == {6}
+
+
+def test_total_profit_is_the_head_count_times_the_mean():
+    result = run_session(
+        short_schedule("drip-poisson", 10.0), mixed_population(3), seed=14, end_time=SHORT_END
+    )
+
+    for entry in result.final_balances.values():
+        assert entry.total_profit == pytest.approx(entry.mean_profit * entry.n_traders)
+
+
+def test_the_balance_frame_is_a_time_series_ending_at_the_final_row():
+    result = run_session(
+        short_schedule("drip-poisson", 10.0), mixed_population(3), seed=15, end_time=SHORT_END
+    )
+    frame = result.balance_frame()
+
+    assert list(frame.columns) == [
+        "time",
+        "strategy",
+        "total_profit",
+        "n_traders",
+        "mean_profit",
+    ]
+    assert frame["time"].is_monotonic_increasing
+    final = frame[frame["time"] == frame["time"].max()]
+    assert dict(zip(final["strategy"], final["mean_profit"], strict=True)) == (
+        result.mean_profit_per_trader
+    )
+
+
+def test_profit_never_decreases_over_a_session():
+    # Balances accumulate booked profit and BSE never debits them, so a falling
+    # series would mean the dump was being read wrongly.
+    result = run_session(
+        short_schedule("drip-poisson", 10.0), mixed_population(3), seed=16, end_time=SHORT_END
+    )
+    frame = result.balance_frame()
+
+    for _, group in frame.groupby("strategy"):
+        assert group["total_profit"].is_monotonic_increasing
 
 
 @pytest.mark.slow
