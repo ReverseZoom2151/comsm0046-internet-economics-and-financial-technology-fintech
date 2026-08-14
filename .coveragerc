@@ -1,0 +1,29 @@
+# Coverage settings for the CI coverage run.
+#
+# This lives in its own file rather than in pyproject.toml so that the pytest
+# and ruff configuration in pyproject.toml stays untouched.
+#
+# fintech/vendor/BSE.py is vendored upstream code. We do not own it, we do not
+# test it, and its 1700-odd statements would otherwise dominate the total and
+# make the number meaningless. It is excluded from linting in pyproject.toml
+# for the same reason.
+
+[run]
+source = fintech
+omit =
+    fintech/vendor/BSE.py
+
+[report]
+# Repeated here as well as under [run]: the omit under [run] keeps the file out
+# of the collected data, and this one keeps it out of the report even when the
+# report is produced from data that was collected without this config.
+omit =
+    fintech/vendor/BSE.py
+# Skip the report rows for files that are wholly covered, so the terminal
+# summary shows only the code that still has gaps.
+skip_covered = True
+show_missing = True
+exclude_also =
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    if __name__ == .__main__.:
