@@ -1,6 +1,6 @@
 <h1 align="center">Internet Economics and Financial Technology</h1>
 
-<p align="center"><strong>Experimental market simulation, hypothesis testing, and sentiment analysis for trading</strong></p>
+<p align="center"><strong>Replicating Vernon Smith's 1962 market experiment on the Bristol Stock Exchange, with hypothesis testing and sentiment analysis for trading</strong></p>
 
 Three strands of coursework from the University of Bristol, written as four
 Jupyter notebooks and since rebuilt as a tested package.
