@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+__MACOSX/
+
+# BSE writes session data as CSV into the working directory
+*_tape.csv
+*_avg_balance.csv
+*_blotters.csv
+*_LOB_frames.csv
+*_strats.csv
+avg_balance.csv
+
+# Keep the course data and the committed figures
+!w5.data/*.csv
+!figures/*.png
