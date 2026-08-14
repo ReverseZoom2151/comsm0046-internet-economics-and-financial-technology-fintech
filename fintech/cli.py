@@ -9,7 +9,7 @@ is named, so a command is safe to run from a script.
 from __future__ import annotations
 
 import argparse
-from typing import Sequence
+from collections.abc import Sequence
 
 DEFAULT_SEED = 100
 
