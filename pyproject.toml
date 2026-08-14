@@ -46,7 +46,10 @@ addopts = "-m 'not network'"
 line-length = 100
 target-version = "py310"
 # The vendored simulator is upstream code and is deliberately not linted.
-extend-exclude = ["fintech/vendor/BSE.py"]
+# Markdown is excluded because newer ruff formats fenced Python blocks inside it,
+# and NOTICE.md deliberately shows a call signature exactly as the original wrote
+# it, which is not the formatting ruff would choose.
+extend-exclude = ["fintech/vendor/BSE.py", "*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "UP", "SIM"]

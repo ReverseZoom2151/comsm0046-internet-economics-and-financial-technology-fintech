@@ -254,11 +254,16 @@ def test_too_few_observations_is_refused():
 def test_scipy_reports_nonsense_for_degenerate_input():
     """Why the refusal matters: scipy answers rather than complaining.
 
-    Shapiro-Wilk on a constant column returns p = 1.0, which reads as perfect
-    normality for a column that has no distribution at all. ANOVA over two
-    constant groups returns NaN, and a NaN p-value compares false against any
-    threshold, so the caller concludes "not significant" from a test that never
-    ran.
+    Shapiro-Wilk on a constant column returns either p = 1.0, which reads as
+    perfect normality for a column that has no distribution at all, or NaN.
+    Which of the two depends on the scipy version, so this asserts only that the
+    answer is unusable rather than pinning a number that moves between releases.
+    ANOVA over two constant groups returns NaN, and a NaN p-value compares false
+    against any threshold, so the caller concludes "not significant" from a test
+    that never ran.
+
+    Either way the result is worse than an error, because it is silent. That is
+    what DegenerateDataError exists to prevent.
     """
 
     with warnings.catch_warnings():
@@ -267,7 +272,8 @@ def test_scipy_reports_nonsense_for_degenerate_input():
         with np.errstate(invalid="ignore"):
             anova = stats.f_oneway([5.0, 5.0, 5.0], [5.0, 5.0, 5.0])
 
-    assert constant.pvalue == pytest.approx(1.0)
+    assert np.isnan(constant.pvalue) or constant.pvalue == pytest.approx(1.0)
+    assert not (constant.pvalue < 0.05), "a constant column must not read as non-normal"
     assert np.isnan(anova.pvalue)
     assert not (anova.pvalue < 0.05)
 

@@ -38,6 +38,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install ruff
+      # Pinned deliberately. ruff's formatter gained the ability to reformat
+      # fenced Python inside Markdown, which broke this job on a release that
+      # had nothing to do with any change here. Bump it on purpose, not by
+      # surprise.
+      - run: pip install ruff==0.16.3
       - run: ruff check fintech tests experiments
       - run: ruff format --check fintech tests experiments
