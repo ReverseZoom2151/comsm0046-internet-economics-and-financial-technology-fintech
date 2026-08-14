@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comsm0046-fintech"
+version = "1.0.0"
+description = "Market simulation, hypothesis testing and sentiment analysis for internet economics and financial technology"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Tiberiu Toca" }]
+dependencies = [
+    "numpy>=1.23",
+    "pandas>=1.5",
+    "matplotlib>=3.6",
+    "scipy>=1.9",
+    "seaborn>=0.13",
+    "statsmodels>=0.14",
+    "textblob>=0.17",
+    "nltk>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.4"]
+
+[project.scripts]
+fintech = "fintech.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["fintech*"]
+
+[tool.setuptools.package-data]
+"fintech.vendor" = ["*.sha256", "*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: full experiment sweeps, deselect with -m 'not slow'",
+    "network: needs the network, deselected by default",
+]
+addopts = "-m 'not network'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# The vendored simulator is upstream code and is deliberately not linted.
+extend-exclude = ["fintech/vendor/BSE.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM"]

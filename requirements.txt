@@ -1,0 +1,8 @@
+numpy>=1.23
+pandas>=1.5
+matplotlib>=3.6
+scipy>=1.9
+seaborn>=0.13          # 0.13 removed the barplot ci= parameter in favour of errorbar=
+statsmodels>=0.14
+textblob>=0.17
+nltk>=3.8
