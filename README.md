@@ -28,7 +28,10 @@ all.
   running ANOVA whatever the answer.
 - Document, sentence and aspect level sentiment analysis, with the aspect
   splitting index arithmetic corrected.
-- A command line interface, and 165 tests.
+- Profit by strategy, read from the balance dump the original discarded, with
+  the differences significance tested.
+- Property based tests over the invariants, alongside the example based suite.
+- A command line interface with JSON output, and 320 tests.
 
 ## Results
 
@@ -39,19 +42,32 @@ The three headlines:
 
 **Smith's finding replicates, and the market shock shows it best.** When the
 equilibrium jumps from 199.5 to 349.5 half way through a session, convergence
-degrades for exactly one trading period and then settles tighter than it ever
-was on the original price. The population re-converges on a number nobody told
-it.
+degrades for exactly one trading period and then recovers. The population
+re-converges on a number nobody told it. It does not end up better converged
+than it started, which an earlier draft of the findings claimed on the strength
+of two point estimates and which testing reversed.
+
+**The sophisticated trading algorithm does not win.** Reading the profit dump
+the notebook discarded: over 40 sessions in a mixed market, SHVR makes 1859 per
+trader, GVWY 1714, ZIP 1637, ZIC 1446. ANOVA gives p = 0.00103, but Tukey
+separates only SHVR and GVWY from ZIC, and ZIP, the only adaptive strategy
+present, is not significantly ahead of anything. Profit turns out to be a
+property of the pairing rather than of the strategy: ZIC comes last in the mixed
+market and beats GVWY decisively head to head.
 
 **One dataset was analysed with a test its own normality check had ruled out.**
 Both conditions of the second dataset reject Shapiro-Wilk, and the notebook ran
 one-way ANOVA regardless, because nothing branched on the result. The conclusion
 survives under Kruskal-Wallis, but it was not justified.
 
-**A general-purpose sentiment analyser is useless for trading, in two different
-ways.** The Associated Press hack tweet of April 2013, which moved US indices by
-about one percent in three minutes, scores polarity 0.0000 and subjectivity
-0.0000: TextBlob scores none of its words at all. The Muddy Waters short-selling
+**A general-purpose sentiment analyser carries no information about finance.**
+Scored against 96 labelled headlines, TextBlob reaches 34.4% accuracy against a
+majority class baseline of 34.4%: answering "neutral" to everything does exactly
+as well. A Loughran-McDonald style finance lexicon reaches 66.7%, McNemar
+p = 2.8e-06, though it is much better at bad news than good. The two famous
+cases behave as the numbers predict: the Associated Press hack tweet of April
+2013, which moved US indices about one percent in three minutes, scores polarity
+0.0000 with not one of its words in the lexicon, and the Muddy Waters
 announcement of August 2019 scores mildly *positive* the evening before its
 target lost more than half its value.
 
@@ -92,6 +108,15 @@ python -m fintech stats data2
 # Sentiment, on the corpus or on your own text
 python -m fintech sentiment hack_crash_tweet
 python -m fintech sentiment "This laptop is wonderful but the battery is poor."
+
+# Which strategy makes the most money, and is the difference real
+python -m fintech profit --sessions 20
+
+# Score both sentiment analysers against the labelled headlines
+python -m fintech evaluate
+
+# Any command can emit JSON instead of a report
+python -m fintech --json evaluate
 ```
 
 The three experiment modules reproduce everything in FINDINGS.md:
@@ -116,17 +141,22 @@ fintech/
   smith.py          Smith's coefficient of convergence, and the named experiments
   datasets.py       the course datasets, loaded by name and validated
   hypothesis_tests.py  normality, equal variance, the chosen omnibus test, post-hoc
+  profitability.py  profit by strategy, mixed market and head to head
+  lexicon.py        a Loughran-McDonald style finance sentiment scorer
+  evaluation.py     both analysers scored on labelled headlines, with McNemar
   sentiment.py      document, sentence and aspect level analysis
   reviews.py        the corpus, in clean UTF-8, with provenance
   plotting.py       figures, and filenames that survive a colon on NTFS
   cli.py            the command line interface
 experiments/
-  smith1962.py        the market replication
-  week5_hypothesis.py both datasets through one pipeline
-  week7_sentiment.py  the four texts, including the two tweets
-data/               the course datasets
+  smith1962.py            the market replication
+  strategy_profit.py      which strategy wins, and whether it is significant
+  week5_hypothesis.py     both datasets through one pipeline
+  week7_sentiment.py      the four texts, including the two tweets
+  sentiment_evaluation.py the two analysers, scored against labels
+data/               the course datasets, and the labelled headlines
 figures/            regenerated by the experiment modules
-tests/              165 tests
+tests/              320 tests, including property based ones
 FINDINGS.md         what each strand measures
 ```
 
@@ -173,6 +203,9 @@ recorded in the commit history and in [FINDINGS.md](FINDINGS.md):
   label named a word the point did not cover.
 - The sentiment corpus had been through a bad encoding round trip, leaving
   replacement characters where pound signs and apostrophes belonged.
+- The market results were compared by eye, in a repository that contains a
+  hypothesis testing pipeline built for exactly that purpose. Two of four
+  convergence claims did not survive being tested with it.
 
 ## Licence and reading
 
