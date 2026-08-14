@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff>=0.4"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "hypothesis>=6.100", "ruff>=0.16"]
 
 [project.scripts]
 fintech = "fintech.cli:main"
