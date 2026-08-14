@@ -60,7 +60,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="download the NLTK tokenizer if it is missing",
     )
 
+    # -- profitability -----------------------------------------------------
+    profit = sub.add_parser("profit", help="which trading strategy makes the most money")
+    profit.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    profit.add_argument("--sessions", type=int, default=20, help="market sessions per arm")
+    profit.add_argument("--each", type=int, default=10, help="traders per strategy per side")
+    profit.add_argument("--seconds", type=float, default=600.0)
+    profit.add_argument(
+        "--head-to-head",
+        action="store_true",
+        help="also run every pair of strategies against each other",
+    )
+
+    # -- sentiment evaluation ----------------------------------------------
+    evaluate = sub.add_parser(
+        "evaluate", help="score the labelled headlines with both sentiment analysers"
+    )
+    evaluate.add_argument("--save-figures", metavar="DIRECTORY", default=None)
+
     sub.add_parser("datasets", help="list the available course datasets")
+
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine readable JSON instead of a formatted report",
+    )
 
     return parser
 
@@ -112,6 +136,99 @@ def _run_stats(args) -> int:
     return 0
 
 
+#: The significance tests need at least three observations per strategy, and a
+#: sample of three is not worth simulating for, so the floor is set higher.
+MIN_PROFIT_SESSIONS = 5
+
+
+def _run_profit(args) -> int:
+    from . import profitability
+
+    if args.sessions < MIN_PROFIT_SESSIONS:
+        print(
+            f"profit needs at least {MIN_PROFIT_SESSIONS} sessions: each session gives one "
+            f"observation per strategy, and the comparison cannot run on fewer than three.",
+        )
+        return 2
+
+    study = profitability.profit_study(
+        seed=args.seed,
+        n_sessions=args.sessions,
+        n_each=args.each,
+        end_time=args.seconds,
+    )
+
+    if getattr(args, "json", False):
+        print(_as_json(study))
+        return 0
+
+    from experiments.strategy_profit import print_profit
+
+    print_profit(study)
+    return 0
+
+
+def _run_evaluate(args) -> int:
+    from . import evaluation
+
+    comparison = evaluation.compare()
+
+    if getattr(args, "json", False):
+        print(_as_json(comparison))
+        return 0
+
+    print(f"{comparison.dataset_size} labelled headlines: {comparison.class_counts}")
+    print()
+    for name, result in comparison.results.items():
+        low, high = result.accuracy_interval
+        print(f"  {name:16} accuracy {result.accuracy:6.1%}  95% CI [{low:.1%}, {high:.1%}]")
+        for metric in result.per_class:
+            print(
+                f"      {metric.label:9} precision {metric.precision:.3f}  "
+                f"recall {metric.recall:.3f}  n={metric.support}"
+            )
+    test = comparison.test
+    print()
+    print(
+        f"  McNemar: {test.n_first_only} for {comparison.first} only, "
+        f"{test.n_second_only} for {comparison.second} only, "
+        f"p = {test.p_value:.3g}"
+        f"{'' if test.significant else '  not significant'}"
+    )
+
+    if args.save_figures:
+        from .plotting import save_figure
+
+        for name, result in comparison.results.items():
+            figure = evaluation.confusion_figure(result)
+            path = save_figure(figure, f"Confusion matrix {name}", args.save_figures)
+            print(f"wrote {path}")
+    return 0
+
+
+def _as_json(value) -> str:
+    """Render a result as JSON, so a run can feed something downstream.
+
+    Dataclasses become objects, tuples become arrays, and anything the encoder
+    does not recognise falls back to its string form rather than raising, since
+    the point is to get the numbers out rather than to round trip the objects.
+    """
+
+    import dataclasses
+    import json
+
+    def default(obj):
+        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            return dataclasses.asdict(obj)
+        if hasattr(obj, "to_dict"):
+            return obj.to_dict()
+        if isinstance(obj, (set, frozenset)):
+            return sorted(obj)
+        return str(obj)
+
+    return json.dumps(value, default=default, indent=2, sort_keys=True)
+
+
 def _run_sentiment(args) -> int:
     from . import reviews, sentiment
 
@@ -149,6 +266,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_stats(args)
     if args.command == "sentiment":
         return _run_sentiment(args)
+    if args.command == "profit":
+        return _run_profit(args)
+    if args.command == "evaluate":
+        return _run_evaluate(args)
 
     return 1
 

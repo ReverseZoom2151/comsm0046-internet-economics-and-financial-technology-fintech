@@ -95,3 +95,55 @@ class TestSentimentCommand:
     def test_it_accepts_arbitrary_text(self, capsys):
         assert main(["sentiment", "This laptop is wonderful."]) == 0
         assert capsys.readouterr().out.strip()
+
+
+class TestProfitCommand:
+    def test_too_few_sessions_is_refused_before_simulating(self, capsys):
+        assert main(["profit", "--sessions", "2"]) == 2
+        assert "at least" in capsys.readouterr().out
+
+    def test_it_reports_profit_by_strategy(self, capsys):
+        assert main(["profit", "--sessions", "5", "--each", "3", "--seconds", "120"]) == 0
+        out = capsys.readouterr().out
+        assert "ZIP" in out and "ZIC" in out
+
+    def test_json_output_parses(self, capsys):
+        import json
+
+        assert main(["--json", "profit", "--sessions", "5", "--each", "3", "--seconds", "120"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert isinstance(payload, dict)
+
+
+class TestEvaluateCommand:
+    def test_it_reports_both_analysers(self, capsys):
+        assert main(["evaluate"]) == 0
+        out = capsys.readouterr().out
+        assert "textblob" in out and "finance_lexicon" in out
+        assert "McNemar" in out
+
+    def test_it_reports_an_accuracy_interval(self, capsys):
+        main(["evaluate"])
+        assert "95% CI" in capsys.readouterr().out
+
+    def test_json_output_parses_and_carries_the_test(self, capsys):
+        import json
+
+        assert main(["--json", "evaluate"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["test"]["p_value"] < 0.05
+
+    def test_figures_are_written_when_asked(self, tmp_path, capsys):
+        main(["evaluate", "--save-figures", str(tmp_path)])
+        capsys.readouterr()
+        written = list(tmp_path.iterdir())
+        assert written and all(p.stat().st_size > 0 for p in written)
+
+
+class TestJsonFlag:
+    def test_it_is_off_by_default(self):
+        assert build_parser().parse_args(["evaluate"]).json is False
+
+    def test_stats_still_reports_text_without_it(self, capsys):
+        main(["stats", "data1"])
+        assert "Dataset data1" in capsys.readouterr().out
